@@ -10,42 +10,62 @@ const StationContext = struct {
     small_volume: f64,
 };
 
-fn onObjectAdded(manager: *wp.ObjectManager, p_object: *go.Object, _: *StationContext) callconv(.c) void {
-    const node: *wp.Node = @ptrCast(p_object);
-    _ = manager;
+pub const ZjContext = struct {
+    core: ?*wp.Core,
+    loop: ?*glib.MainLoop,
+    om: ?*wp.ObjectManager,
+    pub fn init() ZjContext {
+        return ZjContext{
+            .core = null,
+            .loop = null,
+            .om = null,
+        };
+    }
 
-    const props = wp.PipewireObject.getProperties(@ptrCast(node));
-    const station = wp.Properties.get(props, "custom.station.index");
+    pub fn deinit(self: *ZjContext) void {
+        if (self.om) |om| _ = om.unref();
+        if (self.core) |core| {
+            core.disconnect();
+            core.unref();
+        }
+        if (self.loop) |loop| loop.unref();
 
-    std.debug.print("Station detected: {s}\n", .{station orelse "none"});
+        std.debug.print("\nExiting...", .{});
+    }
+};
+
+fn onSigInt(p_data: ?*anyopaque) callconv(.c) c_int {
+    const zj: *ZjContext = @ptrCast(@alignCast(p_data orelse return -1));
+
+    std.debug.print("\nSIGINT recieved, stopping loop", .{});
+    zj.loop.?.quit();
+
+    return 0;
 }
 
 pub fn main() !void {
     wp.init(wp.InitFlags.flags_pipewire);
-
-    const loop = glib.MainLoop.new(null, 0);
-    const wp_core = wp.Core.new(null, null, null);
-    const obj_manager = wp.ObjectManager.new();
-    wp.ObjectManager.addInterest(obj_manager, wp.Node.getGObjectType());
-
-    var settings = StationContext{
-        .default_volume = 1.0,
-        .small_volume = 0.5,
-    };
-
-    obj_manager.requestObjectFeatures(wp.Node.getGObjectType(), 15);
-
-    _ = wp.ObjectManager.signals.object_added.connect(obj_manager, *StationContext, &onObjectAdded, &settings, .{});
-    wp.Core.installObjectManager(wp_core, obj_manager);
-
-    if (wp.Core.connect(wp_core) < 0) {
-        return WpError.ConnectionFailed;
-    }
-    std.debug.print("Successfully connected to WirePlumber!\n", .{});
-    glib.MainLoop.run(loop);
-
-    defer wp_core.disconnect();
-
+    var zj = ZjContext.init();
+    defer zj.deinit();
     const version = wp.getLibraryVersion();
     std.debug.print("WirePlumber version: {s}\n", .{version});
+
+    zj.loop = glib.MainLoop.new(null, 0);
+    zj.core = wp.Core.new(null, null, null);
+    zj.om = wp.ObjectManager.new();
+
+    const client_type = wp.Client.getGObjectType();
+    zj.om.?.addInterest(client_type, @as(usize, 0));
+    zj.om.?.requestObjectFeatures(client_type, 31);
+
+    zj.core.?.installObjectManager(zj.om.?);
+
+    if (zj.core.?.connect() < 0) {
+        return WpError.ConnectionFailed;
+    }
+
+    std.debug.print("Successfully connected to WirePlumber!\n", .{});
+    _ = glib.unixSignalAdd(2, &onSigInt, &zj);
+
+    zj.loop.?.run();
 }
