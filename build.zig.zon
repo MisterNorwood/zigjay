@@ -1,0 +1,9 @@
+.{
+    .name = .zigjay,
+    .version = "0.15.2",
+    .dependencies = .{
+        .wireplumber = .{ .path = "./bindings" },
+    },
+    .paths = .{""},
+    .fingerprint = 0x39d7880a2201aac7,
+}
