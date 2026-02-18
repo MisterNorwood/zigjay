@@ -3,6 +3,7 @@ const wp = @import("wp");
 const glib = @import("glib");
 const go = @import("gobject");
 const gio = @import("gio");
+const logly = @import("logly");
 
 const WpError = error{ConnectionFailed};
 
@@ -16,12 +17,19 @@ pub const ZjContext = struct {
     loop: ?*glib.MainLoop,
     om: ?*wp.ObjectManager,
     pending_pugins: u8,
+    gpa: std.heap.GeneralPurposeAllocator(.{}),
+    allocator: ?std.mem.Allocator,
+    log: ?*logly.Logger,
+
     pub fn init() ZjContext {
         return ZjContext{
             .core = null,
             .loop = null,
             .om = null,
             .pending_pugins = 0,
+            .allocator = undefined,
+            .gpa = std.heap.GeneralPurposeAllocator(.{}){},
+            .log = null,
         };
     }
 
@@ -32,8 +40,10 @@ pub const ZjContext = struct {
             core.unref();
         }
         if (self.loop) |loop| loop.unref();
+        if (self.log) |log| log.deinit();
+        _ = self.gpa.deinit();
 
-        std.debug.print("\nExiting...", .{});
+        std.log.info("\nExiting...", .{});
     }
 
     pub fn onAddPlugin(_: ?*go.Object, res: ?*gio.AsyncResult, p_input: ?*anyopaque) callconv(.c) void {
@@ -41,7 +51,11 @@ pub const ZjContext = struct {
         var err: ?*glib.Error = null;
         if (zj.core.?.loadComponentFinish(res.?, &err) <= 0) {
             if (err) |e| {
-                std.debug.print("Load failed: {s}\n", .{e.f_message orelse "null"});
+                const errFmt = std.fmt.allocPrint(zj.allocator.?, "Load failed: {s}", .{e.f_message orelse "null"}) catch "OutOfMemory!";
+                defer zj.allocator.?.free(errFmt);
+                zj.log.?.err(errFmt, null) catch {};
+                defer zj.log.?.flush() catch {};
+
                 defer err.?.free();
             }
             return;
@@ -57,13 +71,12 @@ pub const ZjContext = struct {
     }
 };
 
-//Basically null for anything that requires GType, TODO: Fix up bindings
 const unull = @as(usize, 0);
 
 fn onSigInt(p_data: ?*anyopaque) callconv(.c) c_int {
     const zj: *ZjContext = @ptrCast(@alignCast(p_data.?));
-
-    std.debug.print("\nSIGINT recieved, stopping loop", .{});
+    zj.log.?.info("\nSIGINT recieved, stopping loop", @src()) catch {};
+    zj.log.?.flush() catch {};
     zj.loop.?.quit();
 
     return 0;
@@ -72,9 +85,15 @@ fn onSigInt(p_data: ?*anyopaque) callconv(.c) c_int {
 pub fn main() !void {
     wp.init(wp.InitFlags.flags_pipewire);
     var zj = ZjContext.init();
+    zj.allocator = zj.gpa.allocator();
+    zj.log = try logly.Logger.init(zj.allocator.?);
     defer zj.deinit();
+
+    var buf: [64]u8 = undefined;
     const version = wp.getLibraryVersion();
-    std.debug.print("WirePlumber version: {s}\n", .{version});
+    const wpVer = try std.fmt.bufPrint(&buf, "WirePlumber version: {s}", .{version});
+
+    try zj.log.?.info(wpVer, null);
 
     zj.loop = glib.MainLoop.new(null, 0);
     zj.core = wp.Core.new(null, null, null);
@@ -94,8 +113,9 @@ pub fn main() !void {
 
     //zj.core.?.loadComponent("libwireplumber-module-mixer-api", "module", null);
 
-    std.debug.print("Successfully connected to WirePlumber!\n", .{});
+    try zj.log.?.info("Successfully connected to WirePlumber!", @src());
     _ = glib.unixSignalAdd(2, &onSigInt, &zj);
 
+    try zj.log.?.flush();
     zj.loop.?.run();
 }

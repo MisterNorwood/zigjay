@@ -21,11 +21,18 @@ pub fn build(b: *std.Build) void {
             .{ .name = "gmodule", .module = gobject.module("gmodule2") },
         },
     });
+    const logly_dep = b.dependency("logly", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    mod.addImport("logly", logly_dep.module("logly"));
 
     const exe = b.addExecutable(.{
         .name = "zigjay",
         .root_module = mod,
     });
+
     b.installArtifact(exe);
 
     const exe_run = b.addRunArtifact(exe);

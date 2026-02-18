@@ -3,6 +3,10 @@
     .version = "0.15.2",
     .dependencies = .{
         .wireplumber = .{ .path = "./bindings" },
+        .logly = .{
+            .url = "https://github.com/muhammad-fiaz/logly.zig/archive/refs/tags/0.1.6.tar.gz",
+            .hash = "logly-0.1.6-kZjLexxIEgCMOhBA3f1bx3lzP-JrTZDAfcYc7vVrtbzV",
+        },
     },
     .paths = .{""},
     .fingerprint = 0x39d7880a2201aac7,
