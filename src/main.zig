@@ -74,13 +74,24 @@ pub const ZjContext = struct {
 
 const unull = @as(usize, 0);
 
+fn onCoreDisconnect(zj: *ZjContext) void {
+    zj.log.?.info("Disconnected from WirePlumber, stopping loop", @src()) catch {};
+    zj.log.?.flush() catch {};
+    zj.loop.?.quit();
+}
+
 fn onSigInt(p_data: ?*anyopaque) callconv(.c) c_int {
     const zj: *ZjContext = @ptrCast(@alignCast(p_data.?));
-    zj.log.?.info("\nSIGINT recieved, stopping loop", @src()) catch {};
+    std.log.info("\n", .{});
+    zj.log.?.info("SIGINT recieved, stopping loop", @src()) catch {};
     zj.log.?.flush() catch {};
     zj.loop.?.quit();
 
     return 0;
+}
+
+fn exec(zj: *ZjContext) void {
+    _ = zj;
 }
 
 pub fn main() !void {
@@ -90,7 +101,7 @@ pub fn main() !void {
     zj.log = try logly.Logger.init(zj.allocator.?);
     defer zj.deinit();
 
-    var buf: [64]u8 = undefined;
+    var buf: [32]u8 = undefined;
     const version = wp.getLibraryVersion();
     const wpVer = try std.fmt.bufPrint(&buf, "WirePlumber version: {s}", .{version});
 
@@ -100,9 +111,12 @@ pub fn main() !void {
     zj.core = wp.Core.new(null, null, null);
     zj.om = wp.ObjectManager.new();
 
-    const client_type = wp.Client.getGObjectType();
-    zj.om.?.addInterest(client_type, unull);
-    zj.om.?.requestObjectFeatures(client_type, 31);
+    zj.om.?.addInterest(wp.Client.getGObjectType(), unull);
+    zj.om.?.addInterest(wp.Node.getGObjectType(), unull);
+    zj.om.?.addInterest(wp.Metadata.getGObjectType(), unull);
+
+    zj.om.?.requestObjectFeatures(wp.Client.getGObjectType(), 17);
+    zj.om.?.requestObjectFeatures(wp.GlobalProxy.getGObjectType(), 17);
 
     if (zj.core.?.connect() < 0) {
         return WpError.ConnectionFailed;
@@ -117,7 +131,11 @@ pub fn main() !void {
     try zj.log.?.info("Successfully connected to WirePlumber!", @src());
     _ = glib.unixSignalAdd(2, &onSigInt, &zj);
 
-    goh.signalConnectSwapped(@ptrCast(@alignCast(zj.core.?)), "disconnected", &zj.loop.?.quit(), &zj);
+    const w_disconnect = goh.Wrap(ZjContext, onCoreDisconnect).wrapper;
+    const w_exec = goh.Wrap(ZjContext, exec).wrapper;
+    goh.signalConnectSwapped(@ptrCast(@alignCast(zj.core.?)), "disconnected", @ptrCast(&w_disconnect), &zj);
+    goh.signalConnectSwapped(@ptrCast(@alignCast(zj.om.?)), "installed", @ptrCast(&w_exec), &zj);
+
     try zj.log.?.flush();
     zj.loop.?.run();
 }
