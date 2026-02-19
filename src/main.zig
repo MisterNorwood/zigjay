@@ -46,30 +46,6 @@ pub const ZjContext = struct {
 
         std.log.info("\nExiting...", .{});
     }
-
-    pub fn onAddPlugin(_: ?*go.Object, res: ?*gio.AsyncResult, p_input: ?*anyopaque) callconv(.c) void {
-        const zj: *ZjContext = @ptrCast(@alignCast(p_input.?));
-        var err: ?*glib.Error = null;
-        if (zj.core.?.loadComponentFinish(res.?, &err) <= 0) {
-            if (err) |e| {
-                const errFmt = std.fmt.allocPrint(zj.allocator.?, "Load failed: {s}", .{e.f_message orelse "null"}) catch "OutOfMemory!";
-                defer zj.allocator.?.free(errFmt);
-                zj.log.?.err(errFmt, null) catch {};
-                defer zj.log.?.flush() catch {};
-
-                defer err.?.free();
-            }
-            return;
-        }
-        zj.pending_pugins -= 1;
-        if (zj.pending_pugins == 0) {
-            const mixer = wp.Plugin.find(zj.core.?, "mixer-api");
-            const gobj: *go.Object = @ptrCast(mixer.?);
-            gobj.set("scale", @as(c_int, 1), @as(?*anyopaque, null));
-
-            zj.core.?.installObjectManager(zj.om.?);
-        }
-    }
 };
 
 const unull = @as(usize, 0);
@@ -78,6 +54,29 @@ fn onCoreDisconnect(zj: *ZjContext) void {
     zj.log.?.info("Disconnected from WirePlumber, stopping loop", @src()) catch {};
     zj.log.?.flush() catch {};
     zj.loop.?.quit();
+}
+pub fn onAddPlugin(_: ?*go.Object, res: ?*gio.AsyncResult, p_input: ?*anyopaque) callconv(.c) void {
+    const zj: *ZjContext = @ptrCast(@alignCast(p_input.?));
+    var err: ?*glib.Error = null;
+    if (zj.core.?.loadComponentFinish(res.?, &err) <= 0) {
+        if (err) |e| {
+            const errFmt = std.fmt.allocPrint(zj.allocator.?, "Load failed: {s}", .{e.f_message orelse "null"}) catch "OutOfMemory!";
+            defer zj.allocator.?.free(errFmt);
+            zj.log.?.err(errFmt, null) catch {};
+            defer zj.log.?.flush() catch {};
+
+            defer err.?.free();
+        }
+        return;
+    }
+    zj.pending_pugins -= 1;
+    if (zj.pending_pugins == 0) {
+        const mixer = wp.Plugin.find(zj.core.?, "mixer-api");
+        const gobj: *go.Object = @ptrCast(mixer.?);
+        gobj.set("scale", @as(c_int, 1), @as(?*anyopaque, null));
+
+        zj.core.?.installObjectManager(zj.om.?);
+    }
 }
 
 fn onSigInt(p_data: ?*anyopaque) callconv(.c) c_int {
@@ -88,6 +87,24 @@ fn onSigInt(p_data: ?*anyopaque) callconv(.c) c_int {
     zj.loop.?.quit();
 
     return 0;
+}
+
+pub fn onSettingsActivated(s: *wp.Settings, res: ?*gio.AsyncResult, zj: *ZjContext) void {
+    defer zj.log.?.flush() catch {};
+    var err: ?*glib.Error = null;
+    const gobj: *wp.Object = @ptrCast(@alignCast(s));
+    if (gobj.activateFinish(res.?, &err) <= 0) {
+        if (err) |e| {
+            const errFmt = std.fmt.allocPrint(zj.allocator.?, "Setting activation failed: {s}", .{e.f_message orelse "null"}) catch "OutOfMemory!";
+            defer zj.allocator.?.free(errFmt);
+            zj.log.?.err(errFmt, null) catch {};
+
+            defer err.?.free();
+        }
+        return;
+    }
+    zj.core.?.registerObject(@ptrCast(@alignCast(s)));
+    zj.log.?.info("Settings loaded", @src()) catch {};
 }
 
 fn exec(zj: *ZjContext) void {
@@ -111,6 +128,10 @@ pub fn main() !void {
     zj.core = wp.Core.new(null, null, null);
     zj.om = wp.ObjectManager.new();
 
+    const settings = wp.Settings.new(zj.core.?, null);
+    const w_onSettings = goh.WrapGasyncResult(wp.Settings, ZjContext, onSettingsActivated).wrapper;
+    wp.Object.activate(@ptrCast(@alignCast(settings)), 0xffffffff, null, @ptrCast(&w_onSettings), &zj);
+
     zj.om.?.addInterest(wp.Client.getGObjectType(), unull);
     zj.om.?.addInterest(wp.Node.getGObjectType(), unull);
     zj.om.?.addInterest(wp.Metadata.getGObjectType(), unull);
@@ -122,9 +143,9 @@ pub fn main() !void {
         return WpError.ConnectionFailed;
     }
     zj.pending_pugins += 1;
-    zj.core.?.loadComponent("libwireplumber-module-default-nodes-api", "module", null, null, null, &ZjContext.onAddPlugin, &zj);
+    zj.core.?.loadComponent("libwireplumber-module-default-nodes-api", "module", null, null, null, &onAddPlugin, &zj);
     zj.pending_pugins += 1;
-    zj.core.?.loadComponent("libwireplumber-module-mixer-api", "module", null, null, null, &ZjContext.onAddPlugin, &zj);
+    zj.core.?.loadComponent("libwireplumber-module-mixer-api", "module", null, null, null, &onAddPlugin, &zj);
 
     //zj.core.?.loadComponent("libwireplumber-module-mixer-api", "module", null);
 
