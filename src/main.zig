@@ -4,6 +4,7 @@ const glib = @import("glib");
 const go = @import("gobject");
 const gio = @import("gio");
 const logly = @import("logly");
+const goh = @import("glib_helper.zig");
 
 const WpError = error{ConnectionFailed};
 
@@ -116,6 +117,7 @@ pub fn main() !void {
     try zj.log.?.info("Successfully connected to WirePlumber!", @src());
     _ = glib.unixSignalAdd(2, &onSigInt, &zj);
 
+    goh.signalConnectSwapped(@ptrCast(@alignCast(zj.core.?)), "disconnected", &zj.loop.?.quit(), &zj);
     try zj.log.?.flush();
     zj.loop.?.run();
 }
