@@ -7,6 +7,10 @@ pub inline fn signalConnectSwapped(p_instance: *go.Object, p_detailed_signal: [*
     _ = go.signalConnectData(p_instance, p_detailed_signal, p_c_handler, p_data, null, go.ConnectFlags.flags_swapped);
 }
 
+pub inline fn signalHandlersDisconnectByData(p_instance: *go.Object, p_data: ?*anyopaque) void {
+    _ = go.signalHandlersDisconnectMatched(p_instance, go.SignalMatchType.flags_data, 0, 0, null, null, p_data);
+}
+
 pub fn Wrap(comptime T: type, comptime func: fn (*T) void) type {
     return struct {
         pub fn wrapper(instance: *anyopaque, data: *anyopaque) callconv(.c) void {

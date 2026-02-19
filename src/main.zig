@@ -37,14 +37,16 @@ pub const ZjContext = struct {
     pub fn deinit(self: *ZjContext) void {
         if (self.om) |om| _ = om.unref();
         if (self.core) |core| {
+            const gobj: *go.Object = @ptrCast(@alignCast(core));
+            _ = goh.signalHandlersDisconnectByData(gobj, self);
             core.disconnect();
-            core.unref();
         }
         if (self.loop) |loop| loop.unref();
         if (self.log) |log| log.deinit();
         _ = self.gpa.deinit();
 
         std.log.info("\nExiting...", .{});
+        return;
     }
 };
 
@@ -52,8 +54,9 @@ const unull = @as(usize, 0);
 
 fn onCoreDisconnect(zj: *ZjContext) void {
     zj.log.?.info("Disconnected from WirePlumber, stopping loop", @src()) catch {};
-    zj.log.?.flush() catch {};
-    zj.loop.?.quit();
+    if (zj.loop.?.isRunning() > 0) {
+        zj.loop.?.quit();
+    }
 }
 pub fn onAddPlugin(_: ?*go.Object, res: ?*gio.AsyncResult, p_input: ?*anyopaque) callconv(.c) void {
     const zj: *ZjContext = @ptrCast(@alignCast(p_input.?));
@@ -74,7 +77,9 @@ pub fn onAddPlugin(_: ?*go.Object, res: ?*gio.AsyncResult, p_input: ?*anyopaque)
         const mixer = wp.Plugin.find(zj.core.?, "mixer-api");
         const gobj: *go.Object = @ptrCast(mixer.?);
         gobj.set("scale", @as(c_int, 1), @as(?*anyopaque, null));
+        defer zj.log.?.flush() catch {};
 
+        zj.log.?.info("Plugins loaded", @src()) catch {};
         zj.core.?.installObjectManager(zj.om.?);
     }
 }
@@ -85,7 +90,6 @@ fn onSigInt(p_data: ?*anyopaque) callconv(.c) c_int {
     zj.log.?.info("SIGINT recieved, stopping loop", @src()) catch {};
     zj.log.?.flush() catch {};
     zj.loop.?.quit();
-
     return 0;
 }
 
@@ -129,6 +133,7 @@ pub fn main() !void {
     zj.om = wp.ObjectManager.new();
 
     const settings = wp.Settings.new(zj.core.?, null);
+    defer settings.unref();
     const w_onSettings = goh.WrapGasyncResult(wp.Settings, ZjContext, onSettingsActivated).wrapper;
     wp.Object.activate(@ptrCast(@alignCast(settings)), 0xffffffff, null, @ptrCast(&w_onSettings), &zj);
 
