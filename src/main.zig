@@ -113,6 +113,7 @@ pub fn onSettingsActivated(s: *wp.Settings, res: ?*gio.AsyncResult, zj: *ZjConte
 
 fn exec(zj: *ZjContext) void {
     _ = zj;
+    std.debug.print("Working", .{});
 }
 
 pub fn main() !void {
