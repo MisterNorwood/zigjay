@@ -1,11 +1,14 @@
 .{
     .name = .zigjay,
-    .version = "0.15.2",
+    .version = "0.16.0",
     .dependencies = .{
-        .wireplumber = .{ .path = "./bindings" },
         .logly = .{
-            .url = "https://github.com/muhammad-fiaz/logly.zig/archive/refs/tags/0.1.6.tar.gz",
-            .hash = "logly-0.1.6-kZjLexxIEgCMOhBA3f1bx3lzP-JrTZDAfcYc7vVrtbzV",
+            .url = "https://github.com/muhammad-fiaz/logly.zig/archive/refs/tags/0.2.0.tar.gz",
+            .hash = "logly-0.2.0-kZjLe_DBGABRBwl7LQgg3KZyD8p3vw-BC3vKuw6NmrBB",
+        },
+        .@"zig-gobject" = .{
+            .url = "https://github.com/ianprime0509/zig-gobject/archive/main.tar.gz",
+            .hash = "gobject_codegen-0.3.1-B33qzayBBwCzgdHS0OPxMtEVdwyL7jQgC0P4-NRplt0C",
         },
     },
     .paths = .{""},

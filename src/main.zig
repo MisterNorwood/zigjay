@@ -39,7 +39,7 @@ pub const ZjContext = struct {
         if (self.core) |core| {
             const gobj: *go.Object = @ptrCast(@alignCast(core));
             _ = goh.signalHandlersDisconnectByData(gobj, self);
-            core.disconnect();
+            core.disconnect(); //Disconnect unrefs by itself
         }
         if (self.loop) |loop| loop.unref();
         if (self.log) |log| log.deinit();
