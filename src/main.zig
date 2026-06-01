@@ -1,25 +1,11 @@
 const std = @import("std");
-const logly = @import("logly");
+const wp = @import("wp");
+const glib = @import("glib");
+const go = @import("gobject");
 
-extern fn pw_init(argc: ?*c_int, argv: ?*?[*]u8) void;
-extern fn pw_deinit() void;
-
-const pw = @cImport({
-    @cInclude("pipewire/main-loop.h");
-    @cInclude("pipewire/context.h");
-    @cInclude("pipewire/core.h");
-    @cInclude("pipewire/proxy.h");
-    @cInclude("pipewire/node.h");
-    @cInclude("pipewire/keys.h");
-    @cInclude("spa/utils/dict.h");
-    @cInclude("spa/utils/hook.h");
-});
-
-const PipewireError = error{
-    MainLoopInitFailed,
-    ContextInitFailed,
-    CoreConnectFailed,
-    RegistryInitFailed,
+const AppError = error{
+    ConnectionFailed,
+    CollectionFailed,
     MissingMode,
     InvalidArguments,
     NodeNotFound,
@@ -45,13 +31,14 @@ const VolumeChange = struct {
 
 const NodeInfo = struct {
     id: u32,
-    permissions: u32,
-    @"type": []const u8,
-    version: u32,
     name: []const u8,
     nickname: []const u8,
     description: []const u8,
+    media_name: []const u8,
     media_class: []const u8,
+    application_name: []const u8,
+    process_binary: []const u8,
+    state: wp.NodeState,
 };
 
 const Cli = struct {
@@ -60,55 +47,40 @@ const Cli = struct {
     change: ?VolumeChange = null,
 };
 
-pub const ZjContext = struct {
-    loop: ?*pw.pw_main_loop,
-    context: ?*pw.pw_context,
-    core: ?*pw.pw_core,
-    registry: ?*pw.pw_registry,
-    registry_listener: pw.spa_hook,
-    core_listener: pw.spa_hook,
-    sync_seq: c_int,
-    initial_sync_done: bool,
+const Collector = struct {
+    core: ?*wp.Core,
+    object_manager: ?*wp.ObjectManager,
     nodes: std.ArrayList(NodeInfo),
-    gpa: std.heap.DebugAllocator(.{}),
-    allocator: ?std.mem.Allocator,
-    log: ?*logly.Logger,
+    allocator: std.mem.Allocator,
 
-    pub fn init() ZjContext {
+    pub fn init(allocator: std.mem.Allocator) Collector {
         return .{
-            .loop = null,
-            .context = null,
             .core = null,
-            .registry = null,
-            .registry_listener = std.mem.zeroes(pw.spa_hook),
-            .core_listener = std.mem.zeroes(pw.spa_hook),
-            .sync_seq = -1,
-            .initial_sync_done = false,
+            .object_manager = null,
             .nodes = .empty,
-            .gpa = .init,
-            .allocator = undefined,
-            .log = null,
+            .allocator = allocator,
         };
     }
 
-    pub fn deinit(self: *ZjContext) void {
+    pub fn deinit(self: *Collector) void {
         for (self.nodes.items) |node| {
-            self.allocator.?.free(node.@"type");
-            self.allocator.?.free(node.name);
-            self.allocator.?.free(node.nickname);
-            self.allocator.?.free(node.description);
-            self.allocator.?.free(node.media_class);
+            self.allocator.free(node.name);
+            self.allocator.free(node.nickname);
+            self.allocator.free(node.description);
+            self.allocator.free(node.media_name);
+            self.allocator.free(node.media_class);
+            self.allocator.free(node.application_name);
+            self.allocator.free(node.process_binary);
         }
-        self.nodes.deinit(self.allocator.?);
+        self.nodes.deinit(self.allocator);
 
-        if (self.registry) |registry| pw.pw_proxy_destroy(@ptrCast(registry));
-        if (self.core) |core| _ = pw.pw_core_disconnect(core);
-        if (self.context) |context| pw.pw_context_destroy(context);
-        if (self.loop) |loop| pw.pw_main_loop_destroy(loop);
-        pw_deinit();
-
-        if (self.log) |log| log.deinit();
-        std.debug.assert(self.gpa.deinit() == .ok);
+        if (self.object_manager) |object_manager| {
+            object_manager.unref();
+        }
+        if (self.core) |core| {
+            core.disconnect();
+            core.unref();
+        }
     }
 };
 
@@ -116,97 +88,42 @@ fn cstr(value: ?[*:0]const u8) []const u8 {
     return if (value) |ptr| std.mem.span(ptr) else "";
 }
 
-fn dictLookup(props: ?*const pw.spa_dict, key: [*:0]const u8) []const u8 {
-    const dict = props orelse return "";
-    return cstr(pw.spa_dict_lookup(dict, key));
+fn dupOrEmpty(allocator: std.mem.Allocator, value: ?[*:0]const u8) ![]const u8 {
+    return allocator.dupe(u8, cstr(value));
 }
 
-fn dupOrEmpty(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
-    return allocator.dupe(u8, value);
+fn isAudioNode(node: *wp.Node) bool {
+    const media_class = cstr(node.as(wp.PipewireObject).getProperty("media.class"));
+    return std.mem.indexOf(u8, media_class, "Audio") != null;
 }
 
-fn appendNode(zj: *ZjContext, node: NodeInfo) void {
-    const allocator = zj.allocator.?;
-    const owned = NodeInfo{
-        .id = node.id,
-        .permissions = node.permissions,
-        .@"type" = dupOrEmpty(allocator, node.@"type") catch return,
-        .version = node.version,
-        .name = dupOrEmpty(allocator, node.name) catch return,
-        .nickname = dupOrEmpty(allocator, node.nickname) catch return,
-        .description = dupOrEmpty(allocator, node.description) catch return,
-        .media_class = dupOrEmpty(allocator, node.media_class) catch return,
-    };
-    zj.nodes.append(allocator, owned) catch {
-        allocator.free(owned.@"type");
-        allocator.free(owned.name);
-        allocator.free(owned.nickname);
-        allocator.free(owned.description);
-        allocator.free(owned.media_class);
-    };
-}
-
-fn onRegistryGlobal(data: ?*anyopaque, id: u32, permissions: u32, type_name: ?[*:0]const u8, version: u32, props: ?*const pw.spa_dict) callconv(.c) void {
-    const zj: *ZjContext = @ptrCast(@alignCast(data.?));
-    const iface = cstr(type_name);
-
-    if (!std.mem.eql(u8, iface, cstr(pw.PW_TYPE_INTERFACE_Node))) {
+fn appendNode(collector: *Collector, node: *wp.Node) void {
+    if (!isAudioNode(node)) {
         return;
     }
 
-    appendNode(zj, .{
-        .id = id,
-        .permissions = permissions,
-        .@"type" = iface,
-        .version = version,
-        .name = dictLookup(props, pw.PW_KEY_NODE_NAME),
-        .nickname = dictLookup(props, pw.PW_KEY_NODE_NICK),
-        .description = dictLookup(props, pw.PW_KEY_NODE_DESCRIPTION),
-        .media_class = dictLookup(props, pw.PW_KEY_MEDIA_CLASS),
-    });
+    const allocator = collector.allocator;
+    const owned = NodeInfo{
+        .id = node.as(wp.Proxy).getBoundId(),
+        .name = dupOrEmpty(allocator, node.as(wp.PipewireObject).getProperty("node.name")) catch return,
+        .nickname = dupOrEmpty(allocator, node.as(wp.PipewireObject).getProperty("node.nick")) catch return,
+        .description = dupOrEmpty(allocator, node.as(wp.PipewireObject).getProperty("node.description")) catch return,
+        .media_name = dupOrEmpty(allocator, node.as(wp.PipewireObject).getProperty("media.name")) catch return,
+        .media_class = dupOrEmpty(allocator, node.as(wp.PipewireObject).getProperty("media.class")) catch return,
+        .application_name = dupOrEmpty(allocator, node.as(wp.PipewireObject).getProperty("application.name")) catch return,
+        .process_binary = dupOrEmpty(allocator, node.as(wp.PipewireObject).getProperty("application.process.binary")) catch return,
+        .state = node.getState(null),
+    };
+    collector.nodes.append(allocator, owned) catch {
+        allocator.free(owned.name);
+        allocator.free(owned.nickname);
+        allocator.free(owned.description);
+        allocator.free(owned.media_name);
+        allocator.free(owned.media_class);
+        allocator.free(owned.application_name);
+        allocator.free(owned.process_binary);
+    };
 }
-
-fn onRegistryGlobalRemove(_: ?*anyopaque, _: u32) callconv(.c) void {}
-
-fn onCoreDone(data: ?*anyopaque, _: u32, seq: c_int) callconv(.c) void {
-    const zj: *ZjContext = @ptrCast(@alignCast(data.?));
-    if (seq != zj.sync_seq or zj.initial_sync_done) return;
-
-    zj.initial_sync_done = true;
-    _ = pw.pw_main_loop_quit(zj.loop.?);
-}
-
-fn onCoreError(data: ?*anyopaque, id: u32, seq: c_int, res: c_int, message: ?[*:0]const u8) callconv(.c) void {
-    const zj: *ZjContext = @ptrCast(@alignCast(data.?));
-    const line = std.fmt.allocPrint(
-        zj.allocator.?,
-        "PipeWire core error: id={d} seq={d} res={d} msg={s}",
-        .{ id, seq, res, cstr(message) },
-    ) catch return;
-    defer zj.allocator.?.free(line);
-
-    zj.log.?.err(line, @src()) catch {};
-    _ = pw.pw_main_loop_quit(zj.loop.?);
-}
-
-const registry_events = pw.pw_registry_events{
-    .version = pw.PW_VERSION_REGISTRY_EVENTS,
-    .global = onRegistryGlobal,
-    .global_remove = onRegistryGlobalRemove,
-};
-
-const core_events = pw.pw_core_events{
-    .version = pw.PW_VERSION_CORE_EVENTS,
-    .info = null,
-    .done = onCoreDone,
-    .ping = null,
-    .@"error" = onCoreError,
-    .remove_id = null,
-    .bound_id = null,
-    .add_mem = null,
-    .remove_mem = null,
-    .bound_props = null,
-};
 
 fn printUsage() void {
     std.debug.print(
@@ -229,11 +146,11 @@ fn parseU8(text: []const u8) !u8 {
 }
 
 fn parseChange(text: []const u8) !VolumeChange {
-    if (text.len == 0) return PipewireError.InvalidVolume;
+    if (text.len == 0) return AppError.InvalidVolume;
 
     if (text[0] == '+' or text[0] == '-') {
         const value = try parseU8(text[1..]);
-        if (value > 100) return PipewireError.InvalidVolume;
+        if (value > 100) return AppError.InvalidVolume;
         return .{
             .kind = .relative,
             .value = value,
@@ -242,7 +159,7 @@ fn parseChange(text: []const u8) !VolumeChange {
     }
 
     const value = try parseU8(text);
-    if (value > 100) return PipewireError.InvalidVolume;
+    if (value > 100) return AppError.InvalidVolume;
     return .{
         .kind = .set,
         .value = value,
@@ -251,15 +168,15 @@ fn parseChange(text: []const u8) !VolumeChange {
 }
 
 fn parseCli(args: []const [:0]const u8) !Cli {
-    if (args.len < 2) return PipewireError.MissingMode;
+    if (args.len < 2) return AppError.MissingMode;
 
     if (std.mem.eql(u8, args[1], "-l")) {
-        if (args.len != 2) return PipewireError.InvalidArguments;
+        if (args.len != 2) return AppError.InvalidArguments;
         return .{ .mode = .list };
     }
 
     if (std.mem.eql(u8, args[1], "-c")) {
-        if (args.len != 4) return PipewireError.InvalidArguments;
+        if (args.len != 4) return AppError.InvalidArguments;
         return .{
             .mode = .change,
             .node_name = args[2],
@@ -267,43 +184,114 @@ fn parseCli(args: []const [:0]const u8) !Cli {
         };
     }
 
-    return PipewireError.InvalidArguments;
+    return AppError.InvalidArguments;
 }
 
-fn collectNodes(zj: *ZjContext) !void {
-    pw_init(null, null);
+fn collectActiveNodes(collector: *Collector, object_manager: *wp.ObjectManager) void {
+    var iter = object_manager.newIterator();
+    defer iter.unref();
 
-    zj.loop = pw.pw_main_loop_new(null) orelse return PipewireError.MainLoopInitFailed;
-    zj.context = pw.pw_context_new(pw.pw_main_loop_get_loop(zj.loop.?), null, 0) orelse return PipewireError.ContextInitFailed;
-    zj.core = pw.pw_context_connect(zj.context.?, null, 0) orelse return PipewireError.CoreConnectFailed;
-    zj.registry = pw.pw_core_get_registry(zj.core.?, pw.PW_VERSION_REGISTRY, 0) orelse return PipewireError.RegistryInitFailed;
+    while (true) {
+        var value = std.mem.zeroes(go.Value);
+        defer value.unset();
 
-    _ = pw.pw_core_add_listener(zj.core.?, &zj.core_listener, &core_events, @ptrCast(zj));
-    _ = pw.pw_registry_add_listener(zj.registry.?, &zj.registry_listener, &registry_events, @ptrCast(zj));
+        if (iter.next(&value) == 0) {
+            break;
+        }
 
-    zj.sync_seq = pw.pw_core_sync(zj.core.?, pw.PW_ID_CORE, 0);
-    _ = pw.pw_main_loop_run(zj.loop.?);
+        const object = value.getObject() orelse continue;
+        appendNode(collector, @ptrCast(@alignCast(object)));
+    }
 }
 
-fn listNodes(zj: *ZjContext) !void {
-    for (zj.nodes.items) |node| {
+fn collectNodes(collector: *Collector) !void {
+    const no_constraints: usize = 0;
+    const object_features: wp.ObjectFeatures = @bitCast(wp.ProxyFeatures.flags_pipewire_object_features_minimal);
+
+    wp.init(wp.InitFlags.flags_all);
+
+    collector.core = wp.Core.new(null, null, null);
+    collector.object_manager = wp.ObjectManager.new();
+
+    collector.object_manager.?.addInterest(wp.Node.getGObjectType(), no_constraints);
+    collector.object_manager.?.requestObjectFeatures(wp.GlobalProxy.getGObjectType(), object_features);
+
+    if (collector.core.?.connect() < 0) {
+        return AppError.ConnectionFailed;
+    }
+
+    collector.core.?.installObjectManager(collector.object_manager.?);
+
+    for (0..5000) |_| {
+        if (collector.object_manager.?.isInstalled() != 0) {
+            collectActiveNodes(collector, collector.object_manager.?);
+            return;
+        }
+
+        while (glib.MainContext.pending(null) != 0) {
+            _ = glib.MainContext.iteration(null, 0);
+        }
+    }
+
+    if (collector.object_manager.?.isInstalled() == 0) {
+        return AppError.CollectionFailed;
+    }
+}
+
+fn stateLabel(state: wp.NodeState) []const u8 {
+    return switch (state) {
+        .creating => "creating",
+        .suspended => "suspended",
+        .idle => "idle",
+        .running => "running",
+        .@"error" => "error",
+        else => "unknown",
+    };
+}
+
+fn displayLabel(node: NodeInfo) []const u8 {
+    if (node.description.len != 0) return node.description;
+    if (node.media_name.len != 0) return node.media_name;
+    if (node.application_name.len != 0) return node.application_name;
+    if (node.nickname.len != 0) return node.nickname;
+    if (node.name.len != 0) return node.name;
+    return "(unnamed)";
+}
+
+fn processLabel(node: NodeInfo) []const u8 {
+    if (node.application_name.len != 0) return node.application_name;
+    if (node.process_binary.len != 0) return node.process_binary;
+    return "-";
+}
+
+fn listNodes(collector: *Collector) void {
+    for (collector.nodes.items) |node| {
         std.debug.print(
-            "{d}\t{s}\t{s}\t{s}\n",
+            "{d}\t{s}\t{s}\t{s}\t{s}\t{s}\n",
             .{
                 node.id,
-                if (node.name.len != 0) node.name else "(unnamed)",
+                stateLabel(node.state),
                 if (node.media_class.len != 0) node.media_class else "(no-class)",
-                if (node.description.len != 0) node.description else node.nickname,
+                displayLabel(node),
+                processLabel(node),
+                if (node.name.len != 0) node.name else "-",
             },
         );
     }
 }
 
-fn findNodeByName(zj: *ZjContext, needle: []const u8) ?NodeInfo {
-    for (zj.nodes.items) |node| {
+fn findNodeByName(collector: *Collector, needle: []const u8) ?NodeInfo {
+    const maybe_id = std.fmt.parseInt(u32, needle, 10) catch null;
+    for (collector.nodes.items) |node| {
+        if (maybe_id) |id| {
+            if (node.id == id) return node;
+        }
         if (std.mem.eql(u8, node.name, needle)) return node;
         if (std.mem.eql(u8, node.nickname, needle)) return node;
         if (std.mem.eql(u8, node.description, needle)) return node;
+        if (std.mem.eql(u8, node.media_name, needle)) return node;
+        if (std.mem.eql(u8, node.application_name, needle)) return node;
+        if (std.mem.eql(u8, node.process_binary, needle)) return node;
     }
     return null;
 }
@@ -330,9 +318,9 @@ fn applyVolumeChange(allocator: std.mem.Allocator, io: std.Io, node: NodeInfo, c
 
     switch (result.term) {
         .exited => |code| {
-            if (code != 0) return PipewireError.VolumeCommandFailed;
+            if (code != 0) return AppError.VolumeCommandFailed;
         },
-        else => return PipewireError.VolumeCommandFailed,
+        else => return AppError.VolumeCommandFailed,
     }
 
     if (change.kind == .set and change.value == 0) {
@@ -343,8 +331,8 @@ fn applyVolumeChange(allocator: std.mem.Allocator, io: std.Io, node: NodeInfo, c
         defer allocator.free(mute_result.stderr);
 
         switch (mute_result.term) {
-            .exited => |code| if (code != 0) return PipewireError.VolumeCommandFailed,
-            else => return PipewireError.VolumeCommandFailed,
+            .exited => |code| if (code != 0) return AppError.VolumeCommandFailed,
+            else => return AppError.VolumeCommandFailed,
         }
     } else if (change.kind == .set) {
         const unmute_result = try std.process.run(allocator, io, .{
@@ -354,8 +342,8 @@ fn applyVolumeChange(allocator: std.mem.Allocator, io: std.Io, node: NodeInfo, c
         defer allocator.free(unmute_result.stderr);
 
         switch (unmute_result.term) {
-            .exited => |code| if (code != 0) return PipewireError.VolumeCommandFailed,
-            else => return PipewireError.VolumeCommandFailed,
+            .exited => |code| if (code != 0) return AppError.VolumeCommandFailed,
+            else => return AppError.VolumeCommandFailed,
         }
     }
 }
@@ -368,17 +356,18 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
-    var zj = ZjContext.init();
-    zj.allocator = zj.gpa.allocator();
-    zj.log = try logly.Logger.init(zj.allocator.?);
-    defer zj.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
 
-    try collectNodes(&zj);
+    var collector = Collector.init(arena_state.allocator());
+    defer collector.deinit();
+
+    try collectNodes(&collector);
 
     switch (cli.mode) {
-        .list => try listNodes(&zj),
+        .list => listNodes(&collector),
         .change => {
-            const node = findNodeByName(&zj, cli.node_name.?) orelse return PipewireError.NodeNotFound;
+            const node = findNodeByName(&collector, cli.node_name.?) orelse return AppError.NodeNotFound;
             try applyVolumeChange(arena, init.io, node, cli.change.?);
             std.debug.print("updated {s}\n", .{node.name});
         },
